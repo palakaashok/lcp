@@ -145,6 +145,13 @@ app.use(helmet({
             // img-src. Without this the page was allowed to ask for a photo and the worker was
             // then refused the very request it had intercepted, so every photo stayed blank.
             'connect-src': ["'self'", 'https://storage.googleapis.com'],
+            // browser-image-compression shrinks a camera photo inside a Web Worker it creates
+            // from a blob: URL. helmet's default has no worker-src, so script-src 'self' was
+            // used as the fallback and the worker was refused; the library then fell back to
+            // the main thread, which freezes the screen for the whole shrink and runs a phone
+            // out of memory on a large photo. Only the page's own code is allowed: 'self' and
+            // the blob: the page itself made. script-src is untouched.
+            'worker-src': ["'self'", 'blob:'],
         },
     },
 }));
@@ -1814,10 +1821,21 @@ const publishToWebsite = async (client, productId) => {
         );
     }
 
+    // Only one row per listing may be the primary category (uq_product_one_primary_category).
+    // This used to insert the saree's own shelf as primary and, on a conflict, set is_primary
+    // on the existing row - without clearing whoever was primary already. On a first publish
+    // there is no other primary and it worked; on a re-publish it made a second one and the
+    // whole transaction failed, so no edit to a saree already on the website could be saved.
+    //
+    // The shelf list a staff member ticks (PUT /api/website/products/:id/shelves) decides the
+    // primary one deliberately, so this must not overrule it: the category is added, and it
+    // becomes primary only when the listing has none.
     await client.query(
         `insert into store.product_categories (product_id, category_id, is_primary)
-         values ($1, $2, true)
-         on conflict (product_id, category_id) do update set is_primary = true`,
+         values ($1, $2, not exists (
+             select 1 from store.product_categories where product_id = $1 and is_primary
+         ))
+         on conflict (product_id, category_id) do nothing`,
         [listing.id, category.id],
     );
 
